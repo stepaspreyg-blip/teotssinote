@@ -1,6 +1,5 @@
-/* TeotssiNote prototype UI. No real account login or sharing yet.
-   Data access is exclusively through TeotStorage.load/save (storage.js).
-   Future Supabase adapter can use the same data shapes. */
+/* TeotssiNote UI with local demo mode and real Supabase Auth + cloud storage.
+   Friend-record access and institutional camera integrations remain future work. */
 (function () {
 'use strict';
 const icons = {
@@ -39,7 +38,18 @@ const icons = {
 const I = (n, size=20) => `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icons[n]||icons.leaf}</svg>`;
 const esc = v => String(v == null ? '' : v).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
 const attr = esc;
-const uid = () => (window.crypto && crypto.randomUUID ? crypto.randomUUID() : 't'+Date.now()+'_'+Math.random().toString(36).slice(2));
+const uid = () => (window.crypto && typeof crypto.randomUUID==='function') ? crypto.randomUUID() : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g,c=>{const r=Math.floor(Math.random()*16);return (c==='x'?r:((r&3)|8)).toString(16);});
+function normalizeImportedIds(input) {
+ const isUuid=v=>/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(v||''));
+ const state=JSON.parse(JSON.stringify(input));
+ const plantIds=new Map(),forestIds=new Map();
+ for(const p of state.plants||[]) { const old=p.id;if(!isUuid(old))p.id=uid();plantIds.set(old,p.id); }
+ for(const f of state.forests||[]) { const old=f.id;if(!isUuid(old))f.id=uid();forestIds.set(old,f.id); }
+ for(const l of state.plantLogs||[]) { if(!isUuid(l.id))l.id=uid();if(plantIds.has(l.plantId))l.plantId=plantIds.get(l.plantId); }
+ for(const l of state.forestLogs||[]) { if(!isUuid(l.id))l.id=uid();if(forestIds.has(l.forestId))l.forestId=forestIds.get(l.forestId); }
+ for(const r of state.reflections||[]) if(!isUuid(r.id))r.id=uid();
+ return state;
+}
 const today = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; };
 const fmt = d => d ? String(d).replace(/^(\d{4})-(\d{2})-(\d{2})$/, (_,y,m,day)=>`${y}.${m}.${day}`) : '기록 없음';
 const validPhoto = s => typeof s === 'string' && (/^data:image\/(jpeg|png|webp|svg\+xml)/i.test(s) || /^https:\/\//i.test(s));
@@ -67,16 +77,32 @@ const lessonData = [
  {id:'decision',title:'어떤 복원 방식이 적절할까요?',tag:'생태와 지역사회',icon:'heart',text:'산불 피해지의 복원 방향을 정할 때는 숲의 자체 회복력, 피해 정도, 토양·지형, 생태적 가치, 재난 안전과 주민의 요구 등을 고려합니다. 자연회복을 돕거나 인위적으로 조림하는 방식은 해당 지역의 상황에 따라 검토합니다.',question:'산불 피해지역의 복원 방식을 정할 때 누구의 의견이 필요할까요?'}
 ];
 let data = {version:1, plants:[], plantLogs:[], forests:[], forestLogs:[], reflections:[], demoFriend:false, nickname:''};
+let auth = {mode:'local', user:null, profile:null, error:null};
+let switchCounter = 0;
+const activeCloud = () => auth.mode === 'cloud' && !!auth.user;
+const storeName = () => activeCloud() ? '클라우드 동기화' : '이 기기 체험 모드';
+const emptyState = () => ({version:1,plants:[],plantLogs:[],forests:[],forestLogs:[],reflections:[],demoFriend:false,nickname:''});
 const ui = {tab:'home',plant:null,forest:null,forestView:'overview',lesson:null,learnView:'index',modal:null,photo:null,selection:{},toastTimer:null};
 const root = document.getElementById('app');
 const nav = [{id:'home',label:'홈',icon:'home'},{id:'plants',label:'나의 텃씨',icon:'sprout'},{id:'forest',label:'숲의 시간',icon:'trees'},{id:'friends',label:'친구',icon:'users'},{id:'learn',label:'배움터',icon:'book'}];
 const P = (title,description,eyebrow='텃씨노트') => `<div class="page-head"><p class="eyebrow">${esc(eyebrow)}</p><h1 class="page-title">${esc(title)}</h1><p class="page-desc">${esc(description)}</p></div>`;
 const B = (text,act,klass='btn-primary',more='') => `<button type="button" class="btn ${klass}" data-act="${act}" ${more}>${text}</button>`;
 const badge = (label,kind='') => `<span class="badge ${kind}">${esc(label)}</span>`;
-function appShell(content) {
-  const current = nav.find(x=>x.id===ui.tab) || nav[0];
-  return `<div class="app-shell"><aside class="sidebar"><div class="brand"><div class="brandmark">${I('sprout',26)}</div><div><strong>텃씨노트</strong><small>TeotssiNote · 프로토타입</small></div></div><nav class="side-nav" aria-label="주요 메뉴">${nav.map(n=>`<button class="nav-item ${ui.tab===n.id?'active':''}" data-nav="${n.id}">${I(n.icon)}<span>${n.label}</span></button>`).join('')}</nav><div class="side-bottom"><button class="nav-item ${ui.tab==='settings'?'active':''}" data-nav="settings">${I('settings')}<span>설정 및 안내</span></button><div class="mode-notice"><strong>체험판 · 이 기기 저장</strong>현재 Google 로그인과 기기 간 공유는 연결 전입니다. 입력한 기록은 이 브라우저에 저장됩니다.</div></div></aside><div class="workarea"><header class="topbar"><div class="topbar-left">${I('sprout',15)} <span style="vertical-align:2px">나의 작은 관찰이 숲의 시간과 만나다</span></div><div class="topbar-right"><span class="pill">시범 웹앱</span><button class="btn btn-outline btn-sm" data-nav="settings" title="설정">${I('settings',15)}</button></div></header><main class="content" id="main-content">${content}<div class="footer-note">텃씨노트 시범 웹앱 · 실제 기관 사진·친구 공유 및 클라우드 동기화는 연동 전입니다. 생태교육 콘텐츠는 전문가 자문을 바탕으로 구성한 학습용 초안입니다.</div></main></div><nav class="mobile-bottom" aria-label="모바일 주요 메뉴">${nav.map(n=>`<button class="mobile-nav ${ui.tab===n.id?'active':''}" data-nav="${n.id}">${I(n.icon)}<span>${n.id==='plants'?'나의 텃씨':n.id==='forest'?'숲의 시간':n.label}</span></button>`).join('')}</nav></div>${ui.modal?modalView():''}`;
+function accountButton() {
+ if(auth.mode==='cloud') return B(`${I('shield',15)} 로그아웃`,'auth-logout','btn-outline btn-sm');
+ if(auth.mode==='loading') return `<span class="pill">계정 확인 중…</span>`;
+ if(auth.mode==='error') return B('연결 다시 시도','auth-retry','btn-outline btn-sm');
+ return B(`${I('users',15)} Google 로그인`,'auth-login','btn-outline btn-sm');
 }
+function appShell(content) {
+ const footer = activeCloud() ? '로그인된 개인 기록은 Supabase에 저장됩니다. 친구 기록 공유와 기관 카메라 연계는 준비 중입니다.'
+   : '체험 모드의 기록은 이 브라우저에 저장됩니다. Google 로그인 후 클라우드 기록을 이용할 수 있습니다.';
+ const status = auth.mode==='cloud' ? `<strong>계정 기반 클라우드 저장</strong>${esc(auth.user?.email||'로그인됨')} · 내 기록을 여러 기기에서 확인할 수 있어요.`
+   : auth.mode==='error' ? `<strong>클라우드 연결 오류</strong>${esc(auth.error||'연결 확인 필요')}`
+   : `<strong>체험판 · 기기 저장</strong>Google 로그인 전에는 기록이 현재 브라우저에 저장됩니다.`;
+ return `<div class="app-shell"><aside class="sidebar"><div class="brand"><div class="brandmark">${I('sprout',26)}</div><div><strong>텃씨노트</strong><small>TeotssiNote · 클라우드 연동 v0.3</small></div></div><nav class="side-nav" aria-label="주요 메뉴">${nav.map(n=>`<button class="nav-item ${ui.tab===n.id?'active':''}" data-nav="${n.id}">${I(n.icon)}<span>${n.label}</span></button>`).join('')}</nav><div class="side-bottom"><button class="nav-item ${ui.tab==='settings'?'active':''}" data-nav="settings">${I('settings')}<span>설정 및 안내</span></button><div class="mode-notice">${status}</div>${accountButton()}</div></aside><div class="workarea"><header class="topbar"><div class="topbar-left">${I('sprout',15)} <span style="vertical-align:2px">나의 작은 관찰이 숲의 시간과 만나다</span></div><div class="topbar-right"><span class="pill">${storeName()}</span>${accountButton()}<button class="btn btn-outline btn-sm" data-nav="settings" title="설정">${I('settings',15)}</button></div></header><main class="content" id="main-content">${content}<div class="footer-note">${footer} 생태교육 콘텐츠는 전문가 자문을 바탕으로 구성한 학습용 초안입니다.</div></main></div><nav class="mobile-bottom" aria-label="모바일 주요 메뉴">${nav.map(n=>`<button class="mobile-nav ${ui.tab===n.id?'active':''}" data-nav="${n.id}">${I(n.icon)}<span>${n.id==='plants'?'나의 텃씨':n.id==='forest'?'숲의 시간':n.label}</span></button>`).join('')}</nav></div>${ui.modal?modalView():''}`;
+}
+
 function render() {
  let content;
  if(ui.tab==='home') content=home();
@@ -92,7 +118,7 @@ function home() {
   const recent = [...data.plantLogs].sort((a,b)=>b.date.localeCompare(a.date)).slice(0,3);
   return `${P('오늘도 작은 변화를 발견해 볼까요?','나의 식물과 숲의 기록을 남기고, 그 변화가 말해 주는 이야기를 찾아보세요.','WELCOME TO TEOTSSINOTE')}
   <div class="card hero"><div class="hero-content"><div class="eyebrow">MY GROWTH JOURNAL</div><h2>씨앗 한 알에서 시작하는<br>오래 이어지는 관찰</h2><p>텃씨노트의 식물을 기르고, 주변 숲과 산불 피해지역의 시간도 함께 살펴보세요.</p>${B(`${I('plus',17)} 새 관찰 시작하기`,'create-plant','btn btn-primary','style="background:#fff;color:#31583f"')}</div><div class="hero-art">${I('sprout',120)}</div></div>
-  <div class="section row between"><h2>내 관찰 현황</h2><small>현재 브라우저 기준</small></div>
+  <div class="section row between"><h2>내 관찰 현황</h2><small>${esc(storeName())}</small></div>
   <div class="stats"><div class="stat"><b>${data.plants.length}</b><span>등록한 식물</span></div><div class="stat"><b>${data.plantLogs.length}</b><span>식물 관찰 기록</span></div><div class="stat"><b>${data.forestLogs.length}</b><span>숲 관찰 기록</span></div></div>
   <div class="section"><h2>바로 시작하기</h2></div><div class="grid cols-3">${feature('sprout','나의 텃씨','사진 한 장과 한 줄의 기록으로 식물의 변화를 남겨요.','plants')}${feature('trees','숲의 시간','공식 시연 자료와 직접 찍은 숲을 비교해요.','forest')}${feature('book','오늘의 배움','숲이 회복되는 다양한 경로를 알아봐요.','learn')}</div>
   <div class="section row between"><h2>최근 성장일지</h2>${B('모든 기록 보기','go-plants','btn-text btn-sm')}</div>
@@ -178,8 +204,8 @@ function forestCompare(){
 }
 function friends(){
  return `${P('친구의 텃씨','내가 허용한 성장 기록을 친구와 공유하는 기능을 준비하고 있어요.')}
- <div class="demo-strip">${I('info',16)} 친구 코드 기반 실제 공유는 <b>Supabase 계정·데이터베이스 연결 후</b> 활성화됩니다. 현재는 가상 친구 데이터로 이용 흐름만 체험할 수 있습니다.</div>
- <div class="grid cols-2"><div class="card"><h2 class="card-title">내 친구 코드</h2><div class="photo-banner" style="margin:13px 0;min-height:105px"><div><b style="font-size:21px;letter-spacing:.6px">발급 준비 중</b><p class="caption" style="margin:7px 0 0">실제 계정 생성 후 고유 코드가 발급돼요.</p></div>${I('users',50)}</div>${B('친구 공유 방식 알아보기','friend-info','btn-outline btn-sm')}</div><div class="card"><h2 class="card-title">친구 등록 시연</h2><p class="card-desc">아래 시연 코드를 입력하면 가상의 친구 성장일지를 열람하는 과정을 체험할 수 있어요.</p><form id="demo-friend-form" class="stack"><div class="field"><label for="friend-code">시연 코드</label><input id="friend-code" name="code" placeholder="TSS-DEMO" autocomplete="off" /></div><button type="submit" class="btn btn-primary">시연 코드 확인</button></form></div></div>
+ <div class="demo-strip">${I('info',16)} 계정별 친구 코드 발급은 지원합니다. 친구 요청 승인과 실제 관찰 기록 공유는 <b>추가 권한 검증 후</b> 지원하며, 아래 친구 등록은 가상 시연입니다.</div>
+ <div class="grid cols-2"><div class="card"><h2 class="card-title">내 친구 코드</h2><div class="photo-banner" style="margin:13px 0;min-height:105px"><div><b style="font-size:17px;letter-spacing:.4px">${esc(auth.profile?.friend_code || (activeCloud()?'코드 확인 중':'로그인 후 확인'))}</b><p class="caption" style="margin:7px 0 0">${activeCloud()?'내 계정에 발급된 친구 코드':'Google 로그인 후 고유 코드가 발급돼요.'}</p></div>${I('users',50)}</div>${B('친구 공유 방식 알아보기','friend-info','btn-outline btn-sm')}</div><div class="card"><h2 class="card-title">친구 등록 시연</h2><p class="card-desc">아래 시연 코드를 입력하면 가상의 친구 성장일지를 열람하는 과정을 체험할 수 있어요.</p><form id="demo-friend-form" class="stack"><div class="field"><label for="friend-code">시연 코드</label><input id="friend-code" name="code" placeholder="TSS-DEMO" autocomplete="off" /></div><button type="submit" class="btn btn-primary">시연 코드 확인</button></form></div></div>
  <div class="section"><h2>연결된 친구</h2></div>
  ${data.demoFriend?`<div class="card"><div class="row between" style="margin-bottom:14px"><div class="row">${I('users',25)}<div><b>샘플 친구</b><div class="caption">가상의 시연용 계정</div></div></div>${badge('시연','demo')}</div>${img(landscape(2),'forest-photo','시연용 친구 식물 기록이 아닌 삽화')}<p class="card-desc">예시 관찰일지: “오늘은 새싹의 잎이 조금 커진 것 같아요.”</p>${B('시연 친구 해제','remove-demo-friend','btn-outline btn-sm')}</div>`:empty('아직 연결된 친구가 없어요.','실제 친구 관계는 계정 인증과 공유 권한 기능이 완성되면 이용할 수 있어요.')}
  <div class="section"><h2>친구 공유 원칙</h2></div><div class="card flat"><div class="stack"><div class="row">${I('shield',21)}<span class="card-desc">실명과 정확한 위치정보는 공유하지 않아요.</span></div><div class="row">${I('check',21)}<span class="card-desc">친구 요청을 수락한 경우에만 허용한 기록을 볼 수 있어요.</span></div><div class="row">${I('trash',21)}<span class="card-desc">언제든 공유를 중단하거나 친구를 삭제할 수 있어요.</span></div></div></div>`;
@@ -200,16 +226,25 @@ function quiz(){return `<div class="row" style="margin-bottom:15px">${B(`${I('ba
  <div class="section"><h2>한 문장으로 정리해 보세요</h2></div><div class="card"><p class="card-desc">개별 식물의 성장과 산림생태계 회복의 공통점·차이점은 무엇일까요?</p>${B('탐구 메모 기록','create-reflection','btn-outline')}</div>`;}
 function people(){return `<div class="row" style="margin-bottom:15px">${B(`${I('back',15)} 배움터`,'learn-back','btn-text btn-sm')}</div>${P('숲과 사람','산불 피해지역의 회복에는 그곳에서 살아가는 사람들의 경험도 중요한 부분을 차지합니다.','COMMUNITY & FOREST')}
  <div class="card"><div class="photo-banner" style="margin-bottom:20px"><div><span class="badge">지역사회 학습</span><h3 style="font-size:20px;margin:11px 0 0">숲이 회복되는 동안,<br>사람들은 어떻게 지낼까요?</h3></div>${I('heart',90)}</div><p class="card-desc">산불 피해는 숲뿐 아니라 주민의 생활과 안전에도 영향을 미칩니다. 백년숲사회적협동조합은 산불 이후 이웃의 안부와 지역의 회복을 함께 생각하는 '안부숲' 활동을 소개하고 있습니다.</p><div class="callout">생각해 보기: 산불 피해지역에서 어떤 숲을 회복할지 결정할 때 주민의 의견은 왜 중요할까요?</div><div class="button-row" style="margin-top:17px"><a class="btn btn-primary" href="https://anbu-forest100.netlify.app/" target="_blank" rel="noopener noreferrer">안부숲 사이트 열기 ${I('external',15)}</a></div><p class="caption" style="margin-top:15px">외부 사이트로 이동합니다. 백년숲과 텃씨노트의 공식 협력 사업이 확정된 것은 아닙니다. 소개 내용은 제공받은 자문에 근거합니다.</p></div>`;}
-function settings(){return `${P('설정 및 안내','기록은 현재 사용 중인 브라우저에 저장됩니다. 실제 Google 로그인·동기화는 후속 연동 예정입니다.')}
- <div class="card"><div class="card-head"><h2 class="card-title">저장 방식</h2>${badge('기기 저장','warn')}</div><p class="card-desc">현재 프로토타입은 브라우저 저장소(IndexedDB, 지원되지 않으면 localStorage)를 사용합니다. 기기 간 자동 동기화와 실제 친구 공유는 아직 지원하지 않습니다. Supabase를 연결하면 같은 웹앱에서 계정 기반 클라우드 저장으로 전환할 계획입니다.</p><div class="stats"><div class="stat"><b>${data.plants.length}</b><span>식물</span></div><div class="stat"><b>${data.plantLogs.length+data.forestLogs.length}</b><span>관찰 기록</span></div><div class="stat"><b>${data.reflections.length}</b><span>탐구 메모</span></div></div></div>
- <div class="section"><h2>데이터 관리</h2></div><div class="card"><p class="card-desc">다른 기기로 수동 이동하려면 기록 파일을 내보낸 뒤 새 기기에서 불러올 수 있습니다. 사진 데이터가 포함되면 파일이 커질 수 있어요.</p><div class="button-row">${B(`${I('download',15)} 기록 내보내기`,'export-data','btn-outline')}${B(`${I('upload',15)} 기록 가져오기`,'import-data','btn-outline')}${B(`${I('trash',15)} 모든 기록 삭제`,'clear-data','btn-danger')}</div><input type="file" id="import-file" accept="application/json,.json" hidden /></div>
- <div class="section"><h2>개발 예정 기능</h2></div><div class="card flat"><div class="stack">${[['shield','Google 계정 로그인'],['globe','기기 간 사진·기록 동기화'],['users','친구 코드·승인 기반 공유'],['camera','협력기관 고정 관찰 카메라 자료 연계']].map(x=>`<div class="row">${I(x[0],19)}<span class="grow" style="font-size:13px">${x[1]}</span>${badge('예정','muted')}</div>`).join('')}</div></div>
- <div class="section"><h2>프로젝트 정보 및 출처</h2></div><div class="card flat"><p class="card-desc"><b>텃씨노트(TeotssiNote)</b>는 청소년들이 식물 관찰과 산림생태복원 학습을 지속할 수 있도록 구상한 환경교육 프로젝트입니다.</p><div class="link-list"><a href="https://www.forest.go.kr/" target="_blank" rel="noopener noreferrer">산림청 공식 홈페이지 ${I('external',16)}</a><a href="https://www.forest100.org/" target="_blank" rel="noopener noreferrer">백년숲사회적협동조합 ${I('external',16)}</a><a href="https://anbu-forest100.netlify.app/" target="_blank" rel="noopener noreferrer">안부숲 캠페인 ${I('external',16)}</a></div><p class="caption">교육 내용은 2026년 11월 5일 한새롬 이사장의 자문 의견을 참고하여 정리한 초안입니다. 공식 관찰 기록은 현재 실제 데이터가 아닌 가상 시연 자료입니다.</p></div>`;}
+function settings(){
+ const cloud=activeCloud();
+ const intro=cloud ? `현재 ${esc(auth.user?.email||'Google 계정')} 계정의 식물·숲 기록이 Supabase 클라우드에 저장됩니다. 다른 기기에서도 같은 계정으로 로그인하면 기록을 불러옵니다.`
+   : 'Google 로그인 전에는 기록이 이 기기의 브라우저에 저장됩니다. 로그인을 해도 기존 체험 기록은 자동으로 업로드되지 않으며, 아래 버튼으로 직접 가져올 수 있습니다.';
+ const cloudTools=cloud?`<div class="section"><h2>이전 기기 기록 가져오기</h2></div><div class="card"><p class="card-desc">로그인 전 이 브라우저에 저장했던 기록이 있다면 선택해서 클라우드로 가져올 수 있습니다. 현재 클라우드 기록과 중복되지 않는 기록만 합칩니다.</p>${B(`${I('upload',15)} 이 기기 기록 클라우드로 가져오기`,'import-local-cloud','btn-outline')}</div>`:'';
+ const loginTools=cloud?B(`${I('shield',15)} Google 로그아웃`,'auth-logout','btn-outline'):B(`${I('users',15)} Google 계정 로그인`,'auth-login','btn-primary');
+ return `${P('설정 및 안내', cloud?'Google 계정으로 기록을 동기화하고 있어요.':'현재는 기기별 체험 기록입니다. 계정을 연결하면 클라우드에 저장할 수 있어요.')}
+ <div class="card"><div class="card-head"><h2 class="card-title">저장 방식</h2>${badge(cloud?'클라우드 동기화':'기기 저장',cloud?'':'warn')}</div><p class="card-desc">${intro}</p><div class="button-row" style="margin-bottom:13px">${loginTools}</div><div class="stats"><div class="stat"><b>${data.plants.length}</b><span>식물</span></div><div class="stat"><b>${data.plantLogs.length+data.forestLogs.length}</b><span>관찰 기록</span></div><div class="stat"><b>${data.reflections.length}</b><span>탐구 메모</span></div></div></div>
+ ${cloudTools}
+ <div class="section"><h2>데이터 관리</h2></div><div class="card"><p class="card-desc">기록을 JSON 파일로 백업하거나 가져올 수 있습니다. 클라우드 이용 중에는 사진 파일도 함께 내보내도록 시도합니다. <b>모든 기록 삭제</b>는 현재 ${cloud?'로그인 계정의 클라우드':'브라우저에 저장된'} 기록을 삭제합니다.</p><div class="button-row">${B(`${I('download',15)} 기록 내보내기`,'export-data','btn-outline')}${B(`${I('upload',15)} 기록 가져오기`,'import-data','btn-outline')}${B(`${I('trash',15)} 모든 기록 삭제`,'clear-data','btn-danger')}</div><input type="file" id="import-file" accept="application/json,.json" hidden /></div>
+ <div class="section"><h2>추가 개발 예정</h2></div><div class="card flat"><div class="stack">${[['users','친구 요청 승인 및 실제 성장일지 공유'],['camera','협력기관 고정 관찰 카메라 자료 연계']].map(x=>`<div class="row">${I(x[0],19)}<span class="grow" style="font-size:13px">${x[1]}</span>${badge('예정','muted')}</div>`).join('')}</div></div>
+ <div class="section"><h2>프로젝트 정보 및 출처</h2></div><div class="card flat"><p class="card-desc"><b>텃씨노트(TeotssiNote)</b>는 청소년들이 식물 관찰과 산림생태복원 학습을 지속할 수 있도록 구상한 환경교육 프로젝트입니다.</p><div class="link-list"><a href="https://www.forest.go.kr/" target="_blank" rel="noopener noreferrer">산림청 공식 홈페이지 ${I('external',16)}</a><a href="https://www.forest100.org/" target="_blank" rel="noopener noreferrer">백년숲사회적협동조합 ${I('external',16)}</a><a href="https://anbu-forest100.netlify.app/" target="_blank" rel="noopener noreferrer">안부숲 캠페인 ${I('external',16)}</a></div><p class="caption">교육 내용은 2026년 11월 5일 한새롬 이사장의 자문 의견을 참고하여 정리한 초안입니다. 공식 관찰 기록은 현재 실제 데이터가 아닌 가상 시연 자료입니다.</p></div>`;
+}
+
 function modalView(){const m=ui.modal;if(!m)return '';
  const plant = ui.plant ? data.plants.find(p=>p.id===ui.plant) : null;
  const forestPlace=ui.forest?data.forests.find(f=>f.id===ui.forest):null;
  let title='',desc='',content='';
- const photoField=`<div class="field"><label for="photo-file">사진 (선택)</label><input id="photo-file" type="file" accept="image/*"/><div class="help">이미지는 브라우저에서 크기를 줄여 이 기기에 저장합니다.</div><div id="photo-preview-area">${ui.photo?img(ui.photo,'image-preview','추가할 사진'):''}</div></div>`;
+ const photoField=`<div class="field"><label for="photo-file">사진 (선택)</label><input id="photo-file" type="file" accept="image/*"/><div class="help">이미지는 자동으로 크기를 줄입니다. Google 로그인 상태에서는 비공개 클라우드 저장소에 업로드합니다.</div><div id="photo-preview-area">${ui.photo?img(ui.photo,'image-preview','추가할 사진'):''}</div></div>`;
  if(m.type==='plant') {const p=m.edit ? data.plants.find(x=>x.id===m.edit) : null;title=p?'식물 정보 수정':'새로운 텃씨 등록';desc='파종 후 나의 식물을 기록해 보세요.';content=`<form id="plant-form" class="stack"><div class="form-grid"><div class="field"><label for="species">식물 종류 *</label><input id="species" name="species" required maxlength="80" placeholder="예: 종자 포장에 적힌 종명" value="${attr(p?.species||'')}" /></div><div class="field"><label for="nickname">식물 별명</label><input id="nickname" name="nickname" maxlength="50" placeholder="예: 초록이" value="${attr(p?.nickname||'')}" /></div><div class="field"><label for="sown">파종일 *</label><input id="sown" type="date" name="sown" required value="${attr(p?.sown||today())}" /></div><div class="field"><label for="place">재배 장소 유형 *</label><select name="place" id="place" required>${['집 안(실내)','집 베란다·마당','거주 지역의 텃밭·정원','기타 허용된 재배 장소',...(p?.place && !['집 안(실내)','집 베란다·마당','거주 지역의 텃밭·정원','기타 허용된 재배 장소'].includes(p.place) ? [p.place] : [])].map(x=>`<option ${p?.place===x?'selected':''}>${x}</option>`).join('')}</select></div></div><div class="form-actions"><button class="btn btn-outline" data-act="close-modal" type="button">취소</button><button class="btn btn-primary" type="submit">${p?'변경 저장':'식물 등록'}</button></div></form>`;}
  else if(m.type==='plant-log') {title='오늘의 성장관찰';desc=`${plant?.nickname||plant?.species||'식물'} · 변화가 보이지 않아도 기록해 보세요.`;content=`<form id="plant-log-form" class="stack"><div class="form-grid"><div class="field"><label for="logdate">관찰 날짜 *</label><input id="logdate" type="date" name="date" required value="${today()}" /></div><div class="field"><label for="status">식물 상태 *</label><select id="status" name="status" required>${['발아 전','새싹 발견','성장 중','시듦·고사','관찰 종료'].map(x=>`<option>${x}</option>`).join('')}</select></div></div>${photoField}<div class="field"><label for="lognote">한 줄 관찰 메모</label><textarea id="lognote" name="note" maxlength="800" placeholder="예: 아직 싹이 나오지 않아 흙과 빛의 조건을 살펴보았다."></textarea></div><div class="callout">발아하지 않거나 시드는 모습도 중요한 관찰 자료예요. 생태 환경과 조건을 생각해 보세요.</div><div class="form-actions"><button type="button" class="btn btn-outline" data-act="close-modal">취소</button><button type="submit" class="btn btn-primary">관찰 기록 저장</button></div></form>`;}
  else if(m.type==='forest') {title='숲 관찰 장소 등록';desc='집 근처나 거주 지역에서 안전하게 방문할 수 있는 숲·녹지 공간을 등록해 보세요.';content=`<form id="forest-form" class="stack"><div class="field"><label for="forestname">관찰 장소 별명 *</label><input id="forestname" name="name" maxlength="70" required placeholder="예: 집 근처 산책로의 작은 숲" /></div><div class="form-grid"><div class="field"><label for="foresttype">장소 유형</label><select id="foresttype" name="type">${['자택 인근 숲','거주 지역의 공원·녹지','거주 지역의 산책로·하천변','기타 안전한 관찰 장소'].map(x=>`<option>${x}</option>`).join('')}</select></div><div class="field"><label for="foreststart">관찰 시작일</label><input id="foreststart" type="date" name="start" value="${today()}" /></div></div><div class="field"><label for="forestguide">같은 구도 촬영을 위한 기준 메모</label><textarea id="forestguide" name="guide" placeholder="예: 산책로 입구의 큰 나무를 중심으로 촬영" maxlength="350"></textarea></div><div class="help">정확한 주소나 좌표는 수집하지 않아요. 산불 피해지 등 출입 제한 장소에는 들어가지 마세요.</div><div class="form-actions"><button class="btn btn-outline" type="button" data-act="close-modal">취소</button><button class="btn btn-primary" type="submit">관찰 장소 저장</button></div></form>`;}
@@ -226,8 +261,26 @@ function modalView(){const m=ui.modal;if(!m)return '';
 }
 function openModal(type,edit){ui.modal={type,edit};ui.photo=null;render();}
 function toast(s){document.querySelector('.toast')?.remove();const t=document.createElement('div');t.className='toast';t.textContent=s;document.body.appendChild(t);clearTimeout(ui.toastTimer);ui.toastTimer=setTimeout(()=>t.remove(),3400);}
-async function save(){try {await TeotStorage.save(data);}catch(err){console.error(err);toast('저장에 실패했습니다. 저장 공간을 확인해 주세요.');}}
-async function saveRender(message){await save();ui.modal=null;ui.photo=null;render();if(message)toast(message);}
+async function save(){
+ if(auth.mode==='loading') throw new Error('로그인 정보를 확인하는 중입니다.');
+ if(auth.mode==='error') throw new Error('클라우드 연결을 먼저 복구해 주세요.');
+ if(activeCloud()) return TeotCloud.save(data);
+ return TeotStorage.save(data);
+}
+async function saveRender(message){
+ try {
+   await save();
+   ui.modal=null;ui.photo=null;render();
+   if(message)toast(message + (activeCloud()?' · 클라우드 저장 완료':''));
+ } catch(err) {
+   console.error(err);
+   try { const current=activeCloud()?await TeotCloud.load():await TeotStorage.load(); if(current)data={...emptyState(),...current}; }
+   catch(e) { console.error('Could not restore state after failed save',e); }
+   ui.modal=null;ui.photo=null;render();
+   toast('저장 실패: '+err.message);
+ }
+}
+
 function changeSelect(el){const id=el.getAttribute('data-select');if(!id)return;ui.selection[id]=el.value;render();}
 async function resizeImage(file) {
  if(!file || !file.type.startsWith('image/'))throw new Error('이미지 파일을 선택해 주세요.');
@@ -241,9 +294,58 @@ async function resizeImage(file) {
    return canvas.toDataURL('image/jpeg',.74);
  } finally {URL.revokeObjectURL(url);}
 }
-function exportData(){const blob=new Blob([JSON.stringify({...data,exportedAt:new Date().toISOString()},null,2)],{type:'application/json'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=`teotssinote-backup-${today()}.json`;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),3000);toast('기록 파일을 내보냈어요.');}
-async function importData(file){if(!file)return;try{if(file.size>35*1024*1024)throw new Error('35MB 이하의 백업 파일만 불러올 수 있습니다.');const obj=JSON.parse(await file.text());for(const k of ['plants','plantLogs','forests','forestLogs','reflections'])if(!Array.isArray(obj[k]))throw new Error('텃씨노트 백업 파일 형식이 아닙니다.');if(!confirm('현재 이 기기의 기록이 백업 파일 내용으로 교체됩니다. 계속하시겠어요?'))return;data={version:1,plants:obj.plants,plantLogs:obj.plantLogs,forests:obj.forests,forestLogs:obj.forestLogs,reflections:obj.reflections,demoFriend:!!obj.demoFriend,nickname:String(obj.nickname||'')};ui.plant=null;ui.forest=null;await saveRender('기록을 불러왔어요.');}catch(err){toast('불러오기 실패: '+err.message);}}
+async function exportData(){
+ try {
+  const toExport=activeCloud()?await TeotCloud.exportWithImages(data):data;
+  const blob=new Blob([JSON.stringify({...toExport,exportedAt:new Date().toISOString()},null,2)],{type:'application/json'});
+  const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=`teotssinote-backup-${today()}.json`;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),3000);toast('기록 파일을 내보냈어요.');
+ } catch(e) { console.error(e);toast('백업 실패: '+e.message); }
+}
+async function importData(file){if(!file)return;try{
+ if(file.size>35*1024*1024)throw new Error('35MB 이하의 백업 파일만 불러올 수 있습니다.');
+ const obj=JSON.parse(await file.text());for(const k of ['plants','plantLogs','forests','forestLogs','reflections'])if(!Array.isArray(obj[k]))throw new Error('텃씨노트 백업 파일 형식이 아닙니다.');
+ if(!confirm(`현재 ${activeCloud()?'클라우드':'이 기기'}의 기록이 백업 파일 내용으로 교체됩니다. 계속하시겠어요?`))return;
+ data=normalizeImportedIds({...emptyState(),plants:obj.plants,plantLogs:obj.plantLogs,forests:obj.forests,forestLogs:obj.forestLogs,reflections:obj.reflections,demoFriend:!!obj.demoFriend,nickname:String(obj.nickname||'')});
+ ui.plant=null;ui.forest=null;await saveRender('기록을 불러왔어요.');
+ }catch(err){toast('불러오기 실패: '+err.message);}}
+async function authChange(nextUser){
+ if(auth.mode==='cloud' && nextUser?.id===auth.user?.id) return;
+ const token=++switchCounter;
+ auth.mode='loading'; auth.error=null; render();
+ try {
+   if(window.TeotCloud) TeotCloud.setUser(nextUser);
+   const saved=nextUser ? await TeotCloud.load() : await TeotStorage.load();
+   if(token!==switchCounter)return;
+   data={...emptyState(),...(saved||{})};
+   auth.user=nextUser||null;
+   auth.mode=nextUser?'cloud':'local';
+   auth.profile=nextUser ? await TeotCloud.profile() : null;
+   ui.plant=null;ui.forest=null;ui.modal=null;render();
+   if(nextUser) toast('Google 계정의 클라우드 기록을 불러왔어요.');
+ }catch(e){
+   if(token!==switchCounter)return;
+   console.error(e);auth.mode='error';auth.user=nextUser||null;auth.error=e.message;
+   render();toast('연동 확인 필요: '+e.message);
+ }
+}
+async function importLocalToCloud(){
+ if(!activeCloud())return toast('먼저 Google 계정에 로그인해 주세요.');
+ let local=await TeotStorage.load();
+ if(local)local=normalizeImportedIds(local);
+ if(!local || !['plants','plantLogs','forests','forestLogs','reflections'].some(k=>Array.isArray(local[k]) && local[k].length))return toast('이 브라우저에 가져올 이전 기록이 없어요.');
+ if(!confirm('현재 기기에 남아 있는 이전 기록을 클라우드에 합칠까요? 이미 같은 ID인 기록은 유지합니다.'))return;
+ for (const field of ['plants','plantLogs','forests','forestLogs','reflections']) {
+   const ids=new Set(data[field].map(x=>x.id));
+   for(const x of (local[field]||[]))if(!ids.has(x.id)){ data[field].push(x);ids.add(x.id); }
+ }
+ await saveRender('이전 기기의 관찰 기록을 클라우드에 가져왔어요.');
+}
+
 async function handleAct(el){const act=el.dataset.act;const id=el.dataset.id;switch(act){
+ case 'auth-login': try { if(!window.TeotCloud?.isAvailable())throw new Error('Supabase 라이브러리를 불러오지 못했습니다. 인터넷 연결을 확인해 주세요.'); await TeotCloud.signIn(); } catch(e) {console.error(e);toast(e.message);} return;
+ case 'auth-logout': if(!confirm('로그아웃하고 이 기기의 체험 기록으로 전환할까요? 클라우드 기록은 삭제되지 않습니다.'))return;try{await TeotCloud.signOut();await authChange(null);}catch(e){console.error(e);toast(e.message);}return;
+ case 'auth-retry':location.reload();return;
+ case 'import-local-cloud':await importLocalToCloud();return;
  case 'go-plants':navigate('plants');return;
  case 'go-learn':navigate('learn');return;
  case 'create-plant':openModal('plant');return;
@@ -271,9 +373,9 @@ async function handleAct(el){const act=el.dataset.act;const id=el.dataset.id;swi
  case 'go-people':ui.lesson=null;ui.learnView='people';render();return;
  case 'learn-back':ui.lesson=null;ui.learnView='index';render();return;
  case 'close-modal':ui.modal=null;ui.photo=null;render();return;
- case 'export-data':exportData();return;
+ case 'export-data':await exportData();return;
  case 'import-data':document.getElementById('import-file')?.click();return;
- case 'clear-data':if(!confirm('이 브라우저의 모든 식물·숲 기록이 삭제됩니다. 이 작업은 되돌릴 수 없습니다. 삭제할까요?'))return;data={version:1,plants:[],plantLogs:[],forests:[],forestLogs:[],reflections:[],demoFriend:false,nickname:''};ui.plant=null;ui.forest=null;await saveRender('모든 기록을 삭제했어요.');return;
+ case 'clear-data':if(!confirm(`현재 ${activeCloud()?'클라우드 계정':'브라우저'}의 모든 식물·숲 기록이 삭제됩니다. 복구할 수 없습니다. 삭제할까요?`))return;data=emptyState();ui.plant=null;ui.forest=null;await saveRender('모든 기록을 삭제했어요.');return;
  }
 }
 document.addEventListener('click',e=>{const link=e.target.closest('[data-nav]');if(link){navigate(link.dataset.nav);return;}const act=e.target.closest('[data-act]');if(act){handleAct(act).catch(err=>{console.error(err);toast('기능 실행 중 오류가 발생했어요.');});return;}if(e.target.id==='modal-backdrop'){ui.modal=null;ui.photo=null;render();}});
@@ -319,5 +421,17 @@ document.addEventListener('submit',async e=>{
  }
  }catch(err){console.error(err);toast('저장 중 오류가 발생했어요. 다시 시도해 주세요.');}
 });
-(async()=>{try{const saved=await TeotStorage.load();if(saved&&Array.isArray(saved.plants)&&Array.isArray(saved.plantLogs)){data={...data,...saved};}}catch(err){console.error(err);}render();})();
+(async()=>{
+ try { const saved=await TeotStorage.load();if(saved&&Array.isArray(saved.plants)&&Array.isArray(saved.plantLogs))data={...data,...saved}; }
+ catch(err){console.error('Local demo storage error',err);}
+ render();
+ if(!window.TeotCloud?.isAvailable()){
+   auth.mode='local';render();toast('클라우드 라이브러리를 불러오지 못해 기기 저장 모드로 실행합니다.');return;
+ }
+ try {
+   auth.mode='loading';render();
+   const current=await TeotCloud.init(authChange);
+   await authChange(current);
+ } catch(err) { auth.mode='error';auth.error=err.message;render();toast('Google 로그인 상태 확인 실패: '+err.message); }
+})();
 })();
